@@ -9,6 +9,7 @@ import {
   generateAuthenticationOptions, verifyAuthenticationResponse
 } from '@simplewebauthn/server';
 import webpush from 'web-push';
+import { createAttemptLimiter, isPasswordHashValid, verifyPassword } from './password-auth.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -19,6 +20,14 @@ const RP_NAME = process.env.RP_NAME || 'openGym';
 // code the admin generates. Both default off so a fresh self-hosted instance stays open.
 const ADMIN_UIDS = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const INVITE_ONLY = /^(1|true|yes|on)$/i.test(process.env.INVITE_ONLY || '');
+const PASSWORD_LOGIN_USER = String(process.env.PASSWORD_LOGIN_USER || '').trim();
+const PASSWORD_LOGIN_HASH = String(process.env.PASSWORD_LOGIN_HASH || '').trim();
+const PASSWORD_LOGIN_UID = String(process.env.PASSWORD_LOGIN_UID || 'password-admin').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+const PASSWORD_LOGIN_NAME = String(process.env.PASSWORD_LOGIN_NAME || PASSWORD_LOGIN_USER || 'Admin').trim().slice(0, 40);
+const PASSWORD_LOGIN_ENABLED = !!(PASSWORD_LOGIN_USER && PASSWORD_LOGIN_UID && isPasswordHashValid(PASSWORD_LOGIN_HASH));
+const passwordAttempts = createAttemptLimiter({ max: 5, windowMs: 15 * 60_000 });
+const passwordGlobalAttempts = createAttemptLimiter({ max: 30, windowMs: 15 * 60_000, maxKeys: 1 });
+let passwordChecksInFlight = 0;
 // 90 days keeps someone who trains a few times a week permanently signed in without a stolen
 // cookie staying good for a year. Overridable because a family instance and one on the open
 // internet don't want the same number. Only affects cookies minted from now on — the expiry is
@@ -46,6 +55,21 @@ function atomicWrite(file, content) {
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, content);
   fs.renameSync(tmp, file);
+}
+// A configured password login provisions one stable admin profile. Only the scrypt hash is
+// kept in the environment; neither the database nor the container receives the cleartext password.
+if (PASSWORD_LOGIN_ENABLED) {
+  let passwordUser = db.users.find(u => u.id === PASSWORD_LOGIN_UID);
+  if (!passwordUser) {
+    passwordUser = { id: PASSWORD_LOGIN_UID, name: PASSWORD_LOGIN_NAME, admin: true, auth: 'password', created: new Date().toISOString() };
+    db.users.push(passwordUser);
+    saveDb();
+  } else if (passwordUser.admin !== true || passwordUser.name !== PASSWORD_LOGIN_NAME) {
+    passwordUser.admin = true;
+    passwordUser.name = PASSWORD_LOGIN_NAME;
+    passwordUser.auth = 'password';
+    saveDb();
+  }
 }
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readState(uid) {
@@ -188,6 +212,12 @@ function readSession(req) {
   if (!Number.isInteger(claimed) || claimed !== sessionVersion(user)) return null;
   return user;
 }
+function clientKey(req) {
+  // This origin is reachable only through Cloudflare Tunnel; Cloudflare overwrites this header.
+  // Do not trust X-Forwarded-For, which may retain client-supplied values through generic proxies.
+  const source = req.headers['cf-connecting-ip'] || req.socket.remoteAddress || 'unknown';
+  return String(source).split(',')[0].trim().slice(0, 64);
+}
 // Guard for /api/admin/* — resolves the caller and 401/403s if they aren't an admin.
 function requireAdmin(req, res) {
   const user = readSession(req);
@@ -256,12 +286,42 @@ const routes = {
   'GET /api/health': async (req, res) => json(res, 200, { ok: true, users: db.users.length }),
 
   // Public config the login screen needs before anyone is signed in.
-  'GET /api/config': async (req, res) => json(res, 200, { invite_only: INVITE_ONLY }),
+  'GET /api/config': async (req, res) => json(res, 200, {
+    invite_only: INVITE_ONLY,
+    password_login: PASSWORD_LOGIN_ENABLED,
+    password_username: PASSWORD_LOGIN_ENABLED ? PASSWORD_LOGIN_USER : ''
+  }),
 
   'GET /api/me': async (req, res) => {
     const user = readSession(req);
     if (!user) return json(res, 401, { error: 'not signed in' });
     json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } });
+  },
+
+  'POST /api/login/password': async (req, res) => {
+    if (!PASSWORD_LOGIN_ENABLED) return json(res, 404, { error: 'password login is not enabled' });
+    const key = clientKey(req);
+    const retryAfter = Math.max(passwordAttempts.retryAfter(key), passwordGlobalAttempts.retryAfter('global'));
+    if (retryAfter) return json(res, 429, { error: 'too many attempts — try again later' }, { 'Retry-After': String(retryAfter) });
+    if (passwordChecksInFlight >= 2)
+      return json(res, 429, { error: 'too many attempts — try again shortly' }, { 'Retry-After': '1' });
+    const body = await readBody(req);
+    const usernameOK = String(body.username || '').trim().toLowerCase() === PASSWORD_LOGIN_USER.toLowerCase();
+    // Always run scrypt, even for an unknown username, to avoid a timing-based username oracle.
+    let passwordOK = false;
+    passwordChecksInFlight++;
+    try { passwordOK = await verifyPassword(String(body.password || ''), PASSWORD_LOGIN_HASH); }
+    finally { passwordChecksInFlight--; }
+    if (!usernameOK || !passwordOK) {
+      passwordAttempts.fail(key);
+      passwordGlobalAttempts.fail('global');
+      return json(res, 401, { error: 'invalid username or password' });
+    }
+    const user = db.users.find(u => u.id === PASSWORD_LOGIN_UID);
+    if (!user) return json(res, 500, { error: 'password user missing' });
+    if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
+    passwordAttempts.clear(key);
+    json(res, 200, { user: { id: user.id, name: user.name, admin: isAdmin(user) } }, { 'Set-Cookie': sessionCookie(user) });
   },
 
   'POST /api/register/options': async (req, res) => {

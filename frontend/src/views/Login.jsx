@@ -1,6 +1,6 @@
 import { useStore } from '../store/useStore.js'
 import { useUI } from '../store/useUI.js'
-import { webauthnOK, passkeyLogin, passkeyRegister, api, BIO } from '../lib/api.js'
+import { webauthnOK, passkeyLogin, passkeyRegister, passwordLogin, api, BIO } from '../lib/api.js'
 import { hasData } from '../store/useStore.js'
 import { t } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
@@ -44,6 +44,30 @@ function RegisterSheet({ close }) {
 
 export default function Login() {
   const { setUser, pullState, setGuest } = useStore()
+  const [passwordEnabled, setPasswordEnabled] = useState(false)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    api('/api/config').then(c => {
+      setPasswordEnabled(!!c.password_login)
+      setUsername(current => current || c.password_username || '')
+    }).catch(() => {})
+  }, [])
+  const signInPassword = async e => {
+    e.preventDefault()
+    if (!username.trim() || !password) { useUI.getState().toast(t('Enter username and password')); return }
+    setBusy(true)
+    try {
+      const u = await passwordLogin(username.trim(), password)
+      setUser(u); await pullState(); useUI.getState().toast(t('Welcome back, {0}', u.name))
+    } catch (e) {
+      const message = e.status === 401 ? t('Invalid username or password')
+        : e.status === 429 ? t('Too many attempts — try again later')
+          : (e.message || t('Sign-in failed'))
+      useUI.getState().toast(message)
+    } finally { setBusy(false) }
+  }
   const signIn = async () => {
     try { const u = await passkeyLogin(); setUser(u); await pullState(); useUI.getState().toast(t('Welcome back, {0}', u.name)) }
     catch (e) { if (e.name !== 'NotAllowedError' && e.name !== 'AbortError') useUI.getState().toast(e.message || t('Sign-in failed')) }
@@ -73,14 +97,26 @@ export default function Login() {
     <div className="narrow" style={wrap}>
       {head}
       <div className="muted" style={{ marginBottom: 34 }}>{t('Your workouts. Your weights. Your profile.')}</div>
-      {webauthnOK() ? <>
+      {passwordEnabled && <>
+        <form onSubmit={signInPassword}>
+          <input className="input" autoComplete="username" placeholder={t('Username')} value={username}
+            disabled={busy} onChange={e => setUsername(e.target.value)} />
+          <div style={{ height: 10 }} />
+          <input className="input" type="password" autoComplete="current-password" placeholder={t('Password')} value={password}
+            disabled={busy} onChange={e => setPassword(e.target.value)} />
+          <div style={{ height: 12 }} />
+          <Button variant="primary" icon="person" type="submit" disabled={busy}>{busy ? t('Signing in…') : t('Sign in')}</Button>
+        </form>
+        <div style={{ height: 10 }} />
+      </>}
+      {!passwordEnabled && (webauthnOK() ? <>
         <Button variant="primary" icon="person" onClick={signIn}>{t('Sign in with passkey')}</Button>
         <div style={{ height: 10 }} />
         <Button icon="sparkles" onClick={() => useUI.getState().openSheet(close => <RegisterSheet close={close} />)}>{t('Create new profile')}</Button>
         <div style={{ height: 10 }} />
-      </> : <div className="card small muted" style={{ textAlign: 'left' }}>{t("This browser doesn't support passkeys — you can still use openGym locally on this device.")}</div>}
+      </> : <div className="card small muted" style={{ textAlign: 'left' }}>{t("This browser doesn't support passkeys — you can still use openGym locally on this device.")}</div>)}
       <Button variant="ghost" className="dim" onClick={() => setGuest(true)}>{t('Continue without account')}</Button>
-      <div className="dim small" style={{ marginTop: 26, lineHeight: 1.5 }}>{t('Passkeys use {0} — no passwords.', BIO)}<br />{t('Each profile keeps its own plan, workouts & body weight.')}</div>
+      <div className="dim small" style={{ marginTop: 26, lineHeight: 1.5 }}>{passwordEnabled ? t('Your account syncs securely across your devices.') : t('Passkeys use {0} — no passwords.', BIO)}<br />{t('Each profile keeps its own plan, workouts & body weight.')}</div>
     </div>
   )
 }
