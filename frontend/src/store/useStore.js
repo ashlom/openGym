@@ -4,10 +4,12 @@ import { localTZ } from '../lib/format.js'
 import { registerCustom } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
 import { MOBILE, nativeLoad, nativeSave, syncReminder } from '../lib/mobile.js'
+import { shouldClearExpiredProfile, shouldResetOwnedState } from '../lib/state-owner.js'
 
 const KEY = 'gym_state_v1'
+const OWNER_KEY = 'gym_state_owner_v1'
 export const DEF = {
-  unit: 'kg', restSec: 90, sound: true, keepAwake: true, lang: 'en',
+  unit: 'kg', restSec: 90, sound: true, keepAwake: true, lang: 'es',
   theme: 'dark', accent: 'lime', body: 'male', targetW: null,
   bodyweight: [], routines: [], week: {}, dayPlan: {},
   exWeights: {}, workouts: [], active: null, customEx: [], gifSize: 'full',
@@ -72,9 +74,11 @@ export const useStore = create((set, get) => {
 
   // Everything a sign-out leaves behind on this device, whichever way it was triggered.
   const clearLocalSession = () => {
+    clearTimeout(pushTm); pushTm = null
     get().setUser(null)
     localStorage.removeItem('gym_guest')
     localStorage.removeItem('gym_dirty')
+    localStorage.removeItem(OWNER_KEY)
     localStorage.removeItem(KEY)
     persist(clone(DEF), false)
   }
@@ -96,18 +100,37 @@ export const useStore = create((set, get) => {
     setGuest(v) { if (v) localStorage.setItem('gym_guest', '1'); else localStorage.removeItem('gym_guest'); set({}) },
 
     setUser(u) {
-      if (u) { localStorage.setItem('gym_user', JSON.stringify(u)); localStorage.removeItem('gym_guest') }
-      else localStorage.removeItem('gym_user')
+      if (u) {
+        let previous = null
+        try { previous = JSON.parse(localStorage.getItem('gym_user')) } catch { /* ignore */ }
+        const owner = localStorage.getItem(OWNER_KEY)
+        // A browser may be shared by several gym users. Never carry profile-owned local state
+        // into a different account; guest data (no owner) remains eligible for explicit migration.
+        if (shouldResetOwnedState(owner, previous?.id, u.id)) {
+          clearTimeout(pushTm); pushTm = null
+          localStorage.removeItem('gym_dirty')
+          localStorage.removeItem('gym_guest')
+          localStorage.removeItem(KEY)
+          localStorage.removeItem(OWNER_KEY)
+          persist(clone(DEF), false)
+        }
+        localStorage.setItem('gym_user', JSON.stringify(u))
+        localStorage.setItem(OWNER_KEY, u.id)
+        localStorage.removeItem('gym_guest')
+      } else localStorage.removeItem('gym_user')
       set({ user: u })
     },
 
     async pushState() {
-      if (!get().user) return
+      const user = get().user
+      if (!user || localStorage.getItem(OWNER_KEY) !== user.id) return
       clearTimeout(pushTm)
       try { await api('/api/data', { method: 'PUT', body: JSON.stringify({ state: get().S }) }); localStorage.removeItem('gym_dirty') }
       catch (e) { localStorage.setItem('gym_dirty', '1') }
     },
     async pullState() {
+      const user = get().user
+      if (!user || localStorage.getItem(OWNER_KEY) !== user.id) return
       try {
         const { state } = await api('/api/data')
         const S = get().S
@@ -183,7 +206,10 @@ export const useStore = create((set, get) => {
           get().update(s => { s.reminder = { ...s.reminder, tz } })
         }
       } catch (e) {
-        if (e.status === 401) get().setUser(null)
+        if (e.status === 401) {
+          if (shouldClearExpiredProfile(get().user?.id, localStorage.getItem(OWNER_KEY))) clearLocalSession()
+          else get().setUser(null) // guest mode has no server session and must survive reloads
+        }
       }
       set({ ready: true })
     }

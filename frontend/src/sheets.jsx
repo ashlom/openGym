@@ -7,7 +7,7 @@ import { lastEntryFor, bestWeightFor, buildSets, effectiveRoutineId, workoutVolu
 import { beep, vibrate } from './lib/sound.js'
 import { t, instrFor, getLang, INSTR_LANGS } from './lib/i18n.js'
 import { nav } from './lib/nav.js'
-import { starterRoutines } from './lib/starter.js'
+import { STARTER_PLANS, installStarterPlan, starterPlan } from './lib/starter.js'
 import Media, { Thumb } from './components/Media.jsx'
 import Stepper from './components/Stepper.jsx'
 import Icon from './components/Icon.jsx'
@@ -42,14 +42,50 @@ export function confirmSheet(opts) {
   ui().openSheet(close => <ConfirmDialog {...opts} close={close} />, { kind: 'center' })
 }
 
-/* ============================ starter plan ============================ */
-export function loadStarterPlan() {
-  const [push, pull, legs] = starterRoutines()
-  update(st => {
-    st.routines.push(push, pull, legs)
-    st.week[1] = push.id; st.week[3] = pull.id; st.week[5] = legs.id
-  })
-  toast(t('Starter plan loaded — Mon Push · Wed Pull · Fri Legs'))
+/* ============================ starter plans ============================ */
+export function loadStarterPlan(id = 'ppl-3') {
+  const plan = starterPlan(id)
+  plan.routines.forEach(routine => { routine.name = t(routine.name) })
+  update(st => { installStarterPlan(st, plan) })
+  toast(t('Plan loaded: {0}', t(plan.title)))
+}
+
+function StarterPlanSheet({ close }) {
+  const choose = plan => {
+    const hasCurrentPlan = useStore.getState().S.routines.length > 0
+    close()
+    if (!hasCurrentPlan) return loadStarterPlan(plan.id)
+    confirmSheet({
+      title: t('Replace current plan?'),
+      message: t('This replaces your current routines and weekly schedule. Your completed workout history is kept.'),
+      confirmText: t('Replace plan'),
+      onConfirm: () => loadStarterPlan(plan.id)
+    })
+  }
+  return <>
+    <h3>{t('Choose a starter plan')}</h3>
+    <div className="muted small" style={{ marginBottom: 14, lineHeight: 1.5 }}>
+      {t('Choose by how many days you want to train. You can edit every routine later.')}
+    </div>
+    <div className="list">
+      {STARTER_PLANS.map(plan => <button key={plan.id} className="item" onClick={() => choose(plan)}>
+        <span className="lrow-i"><Icon name="sparkles" /></span>
+        <span className="grow" style={{ textAlign: 'left' }}>
+          <div className="tt">{t(plan.title)}</div>
+          <div className="ss">{t(plan.description)}</div>
+        </span>
+        <span className="tag acc">{t('{0} days/week', plan.days)}</span>
+        <Icon name="chevronRight" className="chev" />
+      </button>)}
+    </div>
+    <div className="dim small" style={{ marginTop: 12, lineHeight: 1.5 }}>
+      {t('Loading a preset replaces your routines and assigned training days. Your workout history stays intact.')}
+    </div>
+  </>
+}
+
+export function starterPlanSheet() {
+  ui().openSheet(close => <StarterPlanSheet close={close} />)
 }
 
 /* ============================ weight picker (shared: body weight + goal) ============================ */

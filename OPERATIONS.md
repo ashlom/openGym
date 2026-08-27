@@ -7,7 +7,8 @@
 - Proyecto: `/home/rafa/openGym`
 - Persistencia: `/home/rafa/openGym/data`
 - Publicación: Cloudflare Tunnel `6058c359-8365-4914-aa59-f0d2856e7433`
-- Acceso habitual: usuario y contraseña; perfil `Rafa` con permisos de administrador
+- Acceso habitual: usuario y contraseña; perfiles separados para `Rafa`, `Fer`, `Nico` y `Rodri`
+- Administración: sólo el perfil `Rafa` tiene permisos de administrador
 - Passkeys: conservadas sólo como compatibilidad interna; no aparecen en la pantalla de acceso
 - Registro adicional: sólo por invitación (`INVITE_ONLY=1`)
 
@@ -40,7 +41,7 @@ docker compose up -d --build
 
 ## Copia de seguridad
 
-Los perfiles, sesiones, rutinas e historial viven en `data/`. La configuración y el hash scrypt de la contraseña viven en `.env`; la contraseña clara no se almacena.
+Los perfiles, sesiones, rutinas e historial viven en `data/`. Los hashes scrypt de las contraseñas están en `data/password-users.json`, configurado mediante `PASSWORD_USERS_FILE` en `.env`; las contraseñas claras no se almacenan.
 
 ```bash
 cd /home/rafa/openGym
@@ -58,8 +59,19 @@ El CNAME proxied `gym.rjagrimensura.com` apunta al túnel Cloudflare `6058c359-8
 
 1. Abrir `https://gym.rjagrimensura.com`.
 2. Ingresar con el usuario entregado y su contraseña.
-3. El perfil `Rafa` ya está asociado al estado existente y tiene permisos de administrador.
+3. Cada usuario tiene estado, rutinas e historial independientes. El perfil `Rafa` conserva sus datos existentes y tiene permisos de administrador.
 
-El backend conserva únicamente un hash scrypt con salt, limita los intentos por IP y globalmente, admite como máximo dos verificaciones simultáneas y emite una cookie `HttpOnly; Secure; SameSite=Lax`.
+El backend conserva únicamente hashes scrypt con salts independientes, limita los intentos por IP y globalmente, admite como máximo dos verificaciones simultáneas y emite una cookie `HttpOnly; Secure; SameSite=Lax`.
+
+## Planes iniciales
+
+Los perfiles vacíos pueden elegir desde Inicio, Plan o Configuración entre:
+
+- Cuerpo completo, 2 días por semana.
+- Cuerpo completo, 3 días por semana.
+- Torso/Pierna, 4 días por semana.
+- Empuje/Tirón/Piernas, 3 días por semana.
+
+El plan elegido reemplaza las rutinas y la asignación semanal actuales; luego todos los ejercicios, series, repeticiones y días se pueden editar manualmente. El historial de entrenamientos completados se conserva.
 
 No cambiar `RP_ID` después de registrar passkeys: WebAuthn las vincula al hostname exacto.

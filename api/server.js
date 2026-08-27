@@ -9,7 +9,7 @@ import {
   generateAuthenticationOptions, verifyAuthenticationResponse
 } from '@simplewebauthn/server';
 import webpush from 'web-push';
-import { createAttemptLimiter, isPasswordHashValid, verifyPassword } from './password-auth.js';
+import { createAttemptLimiter, isPasswordHashValid, parsePasswordUsers, verifyPassword } from './password-auth.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -20,11 +20,19 @@ const RP_NAME = process.env.RP_NAME || 'openGym';
 // code the admin generates. Both default off so a fresh self-hosted instance stays open.
 const ADMIN_UIDS = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
 const INVITE_ONLY = /^(1|true|yes|on)$/i.test(process.env.INVITE_ONLY || '');
-const PASSWORD_LOGIN_USER = String(process.env.PASSWORD_LOGIN_USER || '').trim();
-const PASSWORD_LOGIN_HASH = String(process.env.PASSWORD_LOGIN_HASH || '').trim();
-const PASSWORD_LOGIN_UID = String(process.env.PASSWORD_LOGIN_UID || 'password-admin').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
-const PASSWORD_LOGIN_NAME = String(process.env.PASSWORD_LOGIN_NAME || PASSWORD_LOGIN_USER || 'Admin').trim().slice(0, 40);
-const PASSWORD_LOGIN_ENABLED = !!(PASSWORD_LOGIN_USER && PASSWORD_LOGIN_UID && isPasswordHashValid(PASSWORD_LOGIN_HASH));
+const PASSWORD_USERS_FILE = String(process.env.PASSWORD_USERS_FILE || '').trim();
+const legacyPasswordAccount = (() => {
+  const username = String(process.env.PASSWORD_LOGIN_USER || '').trim();
+  const hash = String(process.env.PASSWORD_LOGIN_HASH || '').trim();
+  const uid = String(process.env.PASSWORD_LOGIN_UID || 'password-admin').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  const name = String(process.env.PASSWORD_LOGIN_NAME || username || 'Admin').trim().slice(0, 40);
+  return username && uid && isPasswordHashValid(hash) ? [{ username, hash, uid, name, admin: true }] : null;
+})();
+const PASSWORD_USERS = PASSWORD_USERS_FILE
+  ? parsePasswordUsers(fs.readFileSync(PASSWORD_USERS_FILE, 'utf8'))
+  : legacyPasswordAccount ? parsePasswordUsers(legacyPasswordAccount) : [];
+const PASSWORD_USERS_BY_NAME = new Map(PASSWORD_USERS.map(account => [account.username, account]));
+const PASSWORD_LOGIN_ENABLED = PASSWORD_USERS.length > 0;
 const passwordAttempts = createAttemptLimiter({ max: 5, windowMs: 15 * 60_000 });
 const passwordGlobalAttempts = createAttemptLimiter({ max: 30, windowMs: 15 * 60_000, maxKeys: 1 });
 let passwordChecksInFlight = 0;
@@ -56,20 +64,24 @@ function atomicWrite(file, content) {
   fs.writeFileSync(tmp, content);
   fs.renameSync(tmp, file);
 }
-// A configured password login provisions one stable admin profile. Only the scrypt hash is
-// kept in the environment; neither the database nor the container receives the cleartext password.
+// Configured password accounts provision stable, separate profiles. Only scrypt hashes are
+// loaded from the protected data file; cleartext passwords are never stored by the application.
 if (PASSWORD_LOGIN_ENABLED) {
-  let passwordUser = db.users.find(u => u.id === PASSWORD_LOGIN_UID);
-  if (!passwordUser) {
-    passwordUser = { id: PASSWORD_LOGIN_UID, name: PASSWORD_LOGIN_NAME, admin: true, auth: 'password', created: new Date().toISOString() };
-    db.users.push(passwordUser);
-    saveDb();
-  } else if (passwordUser.admin !== true || passwordUser.name !== PASSWORD_LOGIN_NAME) {
-    passwordUser.admin = true;
-    passwordUser.name = PASSWORD_LOGIN_NAME;
-    passwordUser.auth = 'password';
-    saveDb();
+  let dirty = false;
+  for (const account of PASSWORD_USERS) {
+    let passwordUser = db.users.find(user => user.id === account.uid);
+    if (!passwordUser) {
+      passwordUser = { id: account.uid, name: account.name, admin: account.admin, auth: 'password', created: new Date().toISOString() };
+      db.users.push(passwordUser);
+      dirty = true;
+    } else if (passwordUser.admin !== account.admin || passwordUser.name !== account.name || passwordUser.auth !== 'password') {
+      passwordUser.admin = account.admin;
+      passwordUser.name = account.name;
+      passwordUser.auth = 'password';
+      dirty = true;
+    }
   }
+  if (dirty) saveDb();
 }
 const stateFile = uid => path.join(DATA, 'state-' + uid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
 function readState(uid) {
@@ -288,8 +300,7 @@ const routes = {
   // Public config the login screen needs before anyone is signed in.
   'GET /api/config': async (req, res) => json(res, 200, {
     invite_only: INVITE_ONLY,
-    password_login: PASSWORD_LOGIN_ENABLED,
-    password_username: PASSWORD_LOGIN_ENABLED ? PASSWORD_LOGIN_USER : ''
+    password_login: PASSWORD_LOGIN_ENABLED
   }),
 
   'GET /api/me': async (req, res) => {
@@ -303,21 +314,22 @@ const routes = {
     const key = clientKey(req);
     const retryAfter = Math.max(passwordAttempts.retryAfter(key), passwordGlobalAttempts.retryAfter('global'));
     if (retryAfter) return json(res, 429, { error: 'too many attempts — try again later' }, { 'Retry-After': String(retryAfter) });
+    const body = await readBody(req);
+    const username = String(body.username || '').trim().toLowerCase();
     if (passwordChecksInFlight >= 2)
       return json(res, 429, { error: 'too many attempts — try again shortly' }, { 'Retry-After': '1' });
-    const body = await readBody(req);
-    const usernameOK = String(body.username || '').trim().toLowerCase() === PASSWORD_LOGIN_USER.toLowerCase();
-    // Always run scrypt, even for an unknown username, to avoid a timing-based username oracle.
+    const account = PASSWORD_USERS_BY_NAME.get(username);
+    // Always run scrypt against a real hash, even for an unknown username, to avoid a timing oracle.
     let passwordOK = false;
     passwordChecksInFlight++;
-    try { passwordOK = await verifyPassword(String(body.password || ''), PASSWORD_LOGIN_HASH); }
+    try { passwordOK = await verifyPassword(String(body.password || ''), account?.hash || PASSWORD_USERS[0].hash); }
     finally { passwordChecksInFlight--; }
-    if (!usernameOK || !passwordOK) {
+    if (!account || !passwordOK) {
       passwordAttempts.fail(key);
       passwordGlobalAttempts.fail('global');
       return json(res, 401, { error: 'invalid username or password' });
     }
-    const user = db.users.find(u => u.id === PASSWORD_LOGIN_UID);
+    const user = db.users.find(candidate => candidate.id === account.uid);
     if (!user) return json(res, 500, { error: 'password user missing' });
     if (user.disabled) return json(res, 403, { error: 'this account has been disabled' });
     passwordAttempts.clear(key);

@@ -20,6 +20,29 @@ function parsePasswordHash(encoded) {
 
 export const isPasswordHashValid = encoded => parsePasswordHash(encoded) !== null;
 
+export function parsePasswordUsers(raw) {
+  let input;
+  try { input = typeof raw === 'string' ? JSON.parse(raw) : raw; }
+  catch { throw new Error('invalid password users JSON'); }
+  if (!Array.isArray(input) || input.length < 1 || input.length > 100) throw new Error('password users must be a non-empty array');
+  const usernames = new Set(), uids = new Set();
+  return input.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new Error(`invalid password user at index ${index}`);
+    const username = String(entry.username || '').trim().toLowerCase();
+    const uid = String(entry.uid || '').trim();
+    const name = String(entry.name || username).trim();
+    const hash = String(entry.hash || '').trim();
+    if (!/^[a-z0-9._-]{1,64}$/.test(username)) throw new Error(`invalid username at index ${index}`);
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(uid)) throw new Error(`invalid uid at index ${index}`);
+    if (!name || name.length > 40) throw new Error(`invalid name at index ${index}`);
+    if (!isPasswordHashValid(hash)) throw new Error(`invalid password hash at index ${index}`);
+    if (usernames.has(username)) throw new Error(`duplicate username: ${username}`);
+    if (uids.has(uid)) throw new Error(`duplicate uid: ${uid}`);
+    usernames.add(username); uids.add(uid);
+    return { username, uid, name, hash, admin: entry.admin === true };
+  });
+}
+
 export function encodePassword(password, salt = crypto.randomBytes(16)) {
   const { N, r, p, keylen } = DEFAULTS;
   const hash = crypto.scryptSync(String(password), salt, keylen, { N, r, p, maxmem: 64 * 1024 * 1024 });

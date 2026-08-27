@@ -1,12 +1,19 @@
 /* openGym service worker — runtime caching (works with Vite's hashed asset names).
    Media (img/gif) cache-first; everything else network-first with offline fallback. */
-const CACHE = 'opengym-rt-v1'
+const CACHE = 'opengym-rt-v2'
+const BUILD = '__BUILD_ID__' // replaced in the Docker build so every frontend release updates the worker
 
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(keys =>
     Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-  ).then(() => self.clients.claim()))
+  ).then(() => self.clients.claim()).then(() =>
+    // An installed PWA can remain open for days. Reload existing windows once when this
+    // worker changes so they cannot keep running an obsolete JavaScript bundle indefinitely.
+    self.clients.matchAll({ type: 'window' }).then(clients =>
+      Promise.all(clients.map(client => client.navigate(client.url)))
+    )
+  ))
 })
 self.addEventListener('push', e => {
   const data = e.data ? e.data.json() : {}

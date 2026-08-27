@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { createAttemptLimiter, encodePassword, verifyPassword } from './password-auth.js';
+import { createAttemptLimiter, encodePassword, parsePasswordUsers, verifyPassword } from './password-auth.js';
 
 test('password hashes verify the right password and reject the wrong one', async () => {
   const encoded = encodePassword('correct horse battery staple', Buffer.alloc(16, 7));
@@ -26,6 +26,28 @@ test('encoded hashes use scrypt parameters and never contain the password', () =
   assert.equal(Buffer.from(salt, 'base64url').length, 16);
   assert.equal(Buffer.from(hash, 'base64url').length, 32);
   assert.doesNotThrow(() => crypto.timingSafeEqual(Buffer.from(hash, 'base64url'), Buffer.alloc(32)));
+});
+
+test('multi-user password config validates and normalizes accounts', () => {
+  const hash = encodePassword('rafa', Buffer.alloc(16, 3));
+  const users = parsePasswordUsers(JSON.stringify([
+    { username: ' Rafa ', hash, uid: 'existing-rafa', name: 'Rafa', admin: true },
+    { username: 'FER', hash, uid: 'fer', name: 'Fer' },
+  ]));
+  assert.deepEqual(users.map(({ username, uid, name, admin }) => ({ username, uid, name, admin })), [
+    { username: 'rafa', uid: 'existing-rafa', name: 'Rafa', admin: true },
+    { username: 'fer', uid: 'fer', name: 'Fer', admin: false },
+  ]);
+});
+
+test('multi-user password config rejects invalid or duplicate accounts', () => {
+  const hash = encodePassword('rafa', Buffer.alloc(16, 4));
+  assert.throws(() => parsePasswordUsers('{bad json'));
+  assert.throws(() => parsePasswordUsers(JSON.stringify([{ username: 'rafa', hash: 'bad', uid: 'rafa' }])));
+  assert.throws(() => parsePasswordUsers(JSON.stringify([
+    { username: 'Rafa', hash, uid: 'rafa' },
+    { username: 'rafa', hash, uid: 'other' },
+  ])));
 });
 
 test('attempt limiter blocks after five failures and clears after success', () => {

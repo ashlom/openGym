@@ -51,7 +51,6 @@ export default function Login() {
   useEffect(() => {
     api('/api/config').then(c => {
       setPasswordEnabled(!!c.password_login)
-      setUsername(current => current || c.password_username || '')
     }).catch(() => {})
   }, [])
   const signInPassword = async e => {
@@ -99,7 +98,7 @@ export default function Login() {
       <div className="muted" style={{ marginBottom: 34 }}>{t('Your workouts. Your weights. Your profile.')}</div>
       {passwordEnabled && <>
         <form onSubmit={signInPassword}>
-          <input className="input" autoComplete="username" placeholder={t('Username')} value={username}
+          <input className="input" autoComplete="username" autoFocus placeholder={t('Username')} value={username}
             disabled={busy} onChange={e => setUsername(e.target.value)} />
           <div style={{ height: 10 }} />
           <input className="input" type="password" autoComplete="current-password" placeholder={t('Password')} value={password}
