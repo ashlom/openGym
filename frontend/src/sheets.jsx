@@ -11,7 +11,7 @@ import { STARTER_PLANS, installStarterPlan, starterPlan } from './lib/starter.js
 import Media, { Thumb } from './components/Media.jsx'
 import Stepper from './components/Stepper.jsx'
 import Icon from './components/Icon.jsx'
-import { Button, Slider, Switch, Segmented, SelectRow, Row } from './components/ui.jsx'
+import { Button, Slider, Switch, Segmented, SelectRow, Row, NumberField, TextField } from './components/ui.jsx'
 import { glyphOf, GLYPH_GROUPS, DEFAULT_GLYPH } from './lib/glyphs.js'
 import BodyMap from './components/BodyMap.jsx'
 import { loadOfWorkouts } from './lib/muscles.js'
@@ -20,6 +20,10 @@ import { buildPlanBundle, parsePlan, mergePlan, printPlan } from './lib/plan-sha
 import { estimate1RM, best1RM, is1RMRecord, REP_CAP } from './lib/onerm.js'
 import { nextPrescription, applyPrescription, policyFor, defaultIncrement, POLICIES_FOR, POLICY_NAME, POLICY_DESC, MAX_BW_SETS } from './lib/progression.js'
 import { MOBILE, shareExport } from './lib/mobile.js'
+import {
+  HuaweiScaleSession, bytesToHex, deleteHuaweiScaleConfig, huaweiScaleSupported, loadHuaweiScaleConfig,
+  makeToken, saveHuaweiScaleConfig, toProfileWeight,
+} from './lib/huawei-scale.js'
 
 const S = () => useStore.getState().S
 const update = (...a) => useStore.getState().update(...a)
@@ -120,18 +124,170 @@ function WeightInput({ value, setValue, unit }) {
 }
 
 /* ============================ body weight ============================ */
+const SCALE_BUSY = new Set(['requesting', 'connecting', 'authenticating', 'binding', 'configuring', 'waiting'])
+const scaleStatusText = (status, detail, unit) => ({
+  requesting: t('Choose Huawei AH100 / CH100 in the Bluetooth list…'),
+  connecting: t('Connecting to {0}…', detail || 'Huawei AH100'),
+  authenticating: t('Checking the scale connection…'),
+  binding: t('Linking the scale to openGym…'),
+  configuring: t('Preparing your scale profile…'),
+  waiting: t('Step on the scale barefoot and wait for the measurement…'),
+  'bind-required': t('This scale is linked to another app.'),
+  'low-battery': t('The scale battery is low.'),
+  sleeping: t('The scale went to sleep. Step on it and try again.'),
+  disconnected: t('Scale disconnected.'),
+  cancelled: t('Connection cancelled.'),
+  received: detail ? t('Weight received: {0}', fmtNum(detail) + ' ' + unit) : t('Weight received.'),
+  error: t('Could not read the scale. Try again.'),
+}[status] || '')
+
+const scaleErrorText = error => {
+  if (error?.name === 'NotAllowedError' || error?.name === 'AbortError') return t('Connection cancelled.')
+  return ({
+    'bluetooth-unsupported': t('Bluetooth scales require Chrome on Android and a secure HTTPS connection.'),
+    'unsupported-scale-model': t('That Huawei scale model uses a different protocol.'),
+    'scale-disconnected': t('The scale disconnected before finishing.'),
+    'connection-timeout': t('The Bluetooth connection timed out. Wake the scale and try again.'),
+    'authentication-timeout': t('The scale did not answer the connection check.'),
+    'binding-timeout': t('The scale did not finish linking to openGym.'),
+    'measurement-timeout': t('No measurement arrived. Wake the scale and try again.'),
+    'scale-overload': t('The scale reported too much weight.'),
+    'measurement-error': t('Measurement failed. Stand barefoot on the metal contacts.'),
+    'suspected-measurement': t('The scale marked that measurement as unreliable. Please try again.'),
+  })[error?.code] || t('Could not connect. Check the Bluetooth address and try again.')
+}
+
 function BwSheet({ required, onDone, close }) {
   const st = useStore(s => s.S)
+  const user = useStore(s => s.user)
   const unit = st.unit
   const bw = lastBW(st)
+  const savedScale = user ? loadHuaweiScaleConfig(user.id) : null
   const [v, setV] = useState(bw ? bw.w : 70)
+  const [scaleReading, setScaleReading] = useState(null)
+  const [scaleSetup, setScaleSetup] = useState(false)
+  const [scaleConfig, setScaleConfig] = useState(savedScale || {
+    mac: '', token: '', age: null, heightCm: null, male: st.body !== 'female',
+  })
+  const [scaleStatus, setScaleStatus] = useState('idle')
+  const [scaleDetail, setScaleDetail] = useState(null)
+  const [scaleError, setScaleError] = useState('')
+  const sessionRef = useRef(null)
+  const openedForUserRef = useRef(user?.id || null)
+  const sessionOwnerRef = useRef(null)
+  const canUseScale = !!user && !MOBILE && huaweiScaleSupported()
+  const busy = SCALE_BUSY.has(scaleStatus)
+
+  useEffect(() => () => { sessionRef.current?.disconnect().catch(() => {}) }, [])
+  useEffect(() => {
+    if ((user?.id || null) === openedForUserRef.current) return
+    sessionRef.current?.disconnect().catch(() => {})
+    setScaleReading(null)
+    close()
+  }, [user?.id, close])
+
+  const setManualWeight = value => {
+    setV(value)
+    if (scaleReading && value !== scaleReading.profileWeight) setScaleReading(null)
+  }
+
+  const connectScale = async candidate => {
+    const ownerUserId = useStore.getState().user?.id
+    if (!ownerUserId || ownerUserId !== openedForUserRef.current) { close(); return }
+    let config
+    try {
+      const token = candidate.token || bytesToHex(makeToken(0))
+      config = saveHuaweiScaleConfig(ownerUserId, { ...candidate, token })
+    } catch {
+      setScaleError(t('Enter a valid Bluetooth address, age and height.'))
+      setScaleSetup(true)
+      return
+    }
+    setScaleConfig(config)
+    setScaleSetup(false)
+    setScaleError('')
+    setScaleReading(null)
+    setScaleDetail(null)
+    sessionOwnerRef.current = ownerUserId
+    sessionRef.current?.disconnect().catch(() => {})
+    const referenceWeightKg = unit === 'lb' ? v * 0.45359237 : v
+    const session = new HuaweiScaleSession({ ...config, referenceWeightKg }, {
+      onStatus: (status, detail) => {
+        if (useStore.getState().user?.id !== ownerUserId) { session.disconnect().catch(() => {}); return }
+        setScaleStatus(status)
+        if (status === 'received') setScaleDetail(toProfileWeight(detail.weightKg, unit))
+      },
+      onMeasurement: measurement => {
+        if (useStore.getState().user?.id !== ownerUserId) { session.disconnect().catch(() => {}); return }
+        const profileWeight = toProfileWeight(measurement.weightKg, unit)
+        setV(profileWeight)
+        setScaleReading({ ...measurement, profileWeight })
+        setScaleDetail(profileWeight)
+        toast(t('Weight received: {0}', fmtNum(profileWeight) + ' ' + unit))
+        session.disconnect().catch(() => {})
+      },
+      onError: error => {
+        if (useStore.getState().user?.id === ownerUserId) setScaleError(scaleErrorText(error))
+      },
+    })
+    sessionRef.current = session
+    try {
+      await session.connect()
+    } catch (error) {
+      if (useStore.getState().user?.id !== ownerUserId) { await session.disconnect().catch(() => {}); return }
+      const cancelled = error?.name === 'NotAllowedError' || error?.name === 'AbortError'
+      setScaleStatus(cancelled ? 'cancelled' : 'error')
+      if (!cancelled) setScaleError(scaleErrorText(error))
+      await session.disconnect().catch(() => {})
+    }
+  }
+
+  const startScale = () => {
+    if (!savedScale && !scaleConfig.mac) { setScaleSetup(true); return }
+    connectScale(scaleConfig)
+  }
+
+  const bindScale = () => confirmSheet({
+    title: t('Link scale to openGym?'),
+    message: t('This replaces the scale’s current app link. Huawei’s scale app may need to be linked again if you want to use it later.'),
+    confirmText: t('Link to openGym'),
+    danger: true,
+    onConfirm: () => sessionRef.current?.bind().catch(error => { setScaleStatus('error'); setScaleError(scaleErrorText(error)) }),
+  })
+
+  const forgetScale = () => confirmSheet({
+    title: t('Forget this scale?'),
+    message: t('Removes the Bluetooth address, profile data and local scale key from this device. Connecting again will require setup and may require linking the scale again.'),
+    confirmText: t('Forget scale'),
+    danger: true,
+    onConfirm: () => {
+      sessionRef.current?.disconnect().catch(() => {})
+      deleteHuaweiScaleConfig(openedForUserRef.current)
+      setScaleConfig({ mac: '', token: '', age: null, heightCm: null, male: st.body !== 'female' })
+      setScaleReading(null); setScaleError(''); setScaleStatus('idle'); setScaleSetup(true)
+    },
+  })
+
   const save = () => {
+    if ((useStore.getState().user?.id || null) !== openedForUserRef.current) { close(); return }
+    if (scaleReading && sessionOwnerRef.current !== openedForUserRef.current) {
+      setScaleReading(null); toast(t('That reading belongs to another profile.')); return
+    }
     const n = Math.round((v || 0) * 10) / 10
     if (!n || n <= 0) { toast(t('Enter a valid weight')); return }
     update(s => {
       const iso = todayISO()
+      const next = { d: iso, w: n, t: Date.now() }
+      if (scaleReading && n === scaleReading.profileWeight) {
+        if (scaleReading.fatPct !== null) next.fatPct = scaleReading.fatPct
+        if (scaleReading.resistanceOhm !== null) next.impedanceOhm = scaleReading.resistanceOhm
+        next.source = 'huawei-ah100'
+      }
       const ex = s.bodyweight.find(b => b.d === iso)
-      if (ex) { ex.w = n; ex.t = Date.now() } else s.bodyweight.push({ d: iso, w: n, t: Date.now() })
+      if (ex) {
+        delete ex.fatPct; delete ex.impedanceOhm; delete ex.source
+        Object.assign(ex, next)
+      } else s.bodyweight.push(next)
       s.bodyweight.sort((a, b) => (a.d < b.d ? -1 : 1))
     })
     close()
@@ -142,7 +298,50 @@ function BwSheet({ required, onDone, close }) {
   return <>
     <h3>{required ? t('Quick check-in') : t('Log body weight')}</h3>
     <div className="muted small">{required ? t('Slide or tap to set your weight — tracked before every workout so your curve stays honest.') : t('Today') + ', ' + fmtDate(todayISO(), true)}</div>
-    <WeightInput value={v} setValue={setV} unit={unit} />
+
+    {!!user && !MOBILE && <div style={{ marginTop: 14 }}>
+      {canUseScale ? <>
+        {!scaleSetup && <Button variant="tinted" icon="scale" disabled={busy} onClick={startScale}>
+          {busy ? t('Reading scale…') : t('Connect Huawei scale')}
+        </Button>}
+        {scaleSetup && <div className="card" style={{ padding: 14, textAlign: 'left' }}>
+          <div className="tt" style={{ marginBottom: 4 }}>{t('Huawei AH100 / CH100 setup')}</div>
+          <div className="small muted" style={{ lineHeight: 1.45, marginBottom: 12 }}>
+            {t('One-time setup. Find the Bluetooth address (MAC) in an app such as nRF Connect, then enter your real profile data for body composition. These scale settings stay only on this device.')}
+          </div>
+          <label className="small muted" htmlFor="scale-mac">{t('Bluetooth address (MAC)')}</label>
+          <TextField id="scale-mac" value={scaleConfig.mac} placeholder="AA:BB:CC:DD:EE:FF" autoCapitalize="characters" autoCorrect="off" spellCheck={false}
+            onChange={event => setScaleConfig(c => ({ ...c, mac: event.target.value }))} />
+          <div className="row" style={{ gap: 10, marginTop: 12 }}>
+            <div className="grow"><div className="small muted">{t('Age')}</div><NumberField nullable decimal={false} value={scaleConfig.age} onChange={age => setScaleConfig(c => ({ ...c, age }))} /></div>
+            <div className="grow"><div className="small muted">{t('Height (cm)')}</div><NumberField nullable decimal={false} value={scaleConfig.heightCm} onChange={heightCm => setScaleConfig(c => ({ ...c, heightCm }))} /></div>
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <div className="small muted" style={{ marginBottom: 5 }}>{t('Sex')}</div>
+            <Segmented options={[{ value: 'male', label: t('Male') }, { value: 'female', label: t('Female') }]}
+              value={scaleConfig.male ? 'male' : 'female'} onChange={value => setScaleConfig(c => ({ ...c, male: value === 'male' }))} />
+          </div>
+          <div style={{ height: 12 }} />
+          <Button variant="primary" icon="scale" onClick={() => connectScale(scaleConfig)}>{t('Save and connect')}</Button>
+          <div style={{ height: 6 }} /><Button variant="ghost" className="dim" onClick={() => setScaleSetup(false)}>{t('Cancel')}</Button>
+          {savedScale && <><div style={{ height: 2 }} /><Button variant="ghost" className="dim" style={{ color: 'var(--red)' }} onClick={forgetScale}>{t('Forget scale')}</Button></>}
+        </div>}
+        {!!scaleStatusText(scaleStatus, scaleDetail, unit) && <div role="status" aria-live="polite" className="small" style={{ color: scaleStatus === 'error' ? 'var(--red)' : 'var(--label-2)', marginTop: 9, lineHeight: 1.45 }}>
+          {scaleStatusText(scaleStatus, scaleDetail, unit)}
+        </div>}
+        {scaleStatus === 'bind-required' && <div style={{ marginTop: 8 }}><Button variant="danger" onClick={bindScale}>{t('Link scale to openGym')}</Button></div>}
+        {!!scaleError && <div className="small" style={{ color: 'var(--red)', marginTop: 8, lineHeight: 1.45 }}>{scaleError}</div>}
+        {!scaleSetup && savedScale && !busy && <Button variant="ghost" size="sm" className="dim" onClick={() => { setScaleError(''); setScaleSetup(true) }}>{t('Scale settings')}</Button>}
+      </> : <div className="small dim" style={{ lineHeight: 1.45 }}>
+        {t('Bluetooth scale connection is available in Chrome on Android over HTTPS.')}
+      </div>}
+    </div>}
+
+    <WeightInput value={v} setValue={setManualWeight} unit={unit} />
+    {scaleReading && (scaleReading.fatPct !== null || scaleReading.resistanceOhm !== null) && <div className="tiles" style={{ marginTop: 10 }}>
+      {scaleReading.fatPct !== null && <div className="tile"><div className="l">{t('Body fat')}</div><div className="v" style={{ fontSize: '1.05rem' }}>{fmtNum(scaleReading.fatPct)}%</div></div>}
+      {scaleReading.resistanceOhm !== null && <div className="tile"><div className="l">{t('Impedance')}</div><div className="v" style={{ fontSize: '1.05rem' }}>{scaleReading.resistanceOhm} Ω</div></div>}
+    </div>}
     <div style={{ height: 14 }} />
     <Button variant="primary" onClick={save}>{required ? t('Save & start workout') : t('Save')}</Button>
     {required && <>

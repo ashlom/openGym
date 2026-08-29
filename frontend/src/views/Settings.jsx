@@ -10,7 +10,7 @@ import { wakeLockSupported } from '../lib/wakelock.js'
 import { t, LANGS, INSTR_LANGS } from '../lib/i18n.js'
 import { DEMO, REPO } from '../lib/demo.js'
 import { MOBILE, shareExport, syncReminder } from '../lib/mobile.js'
-import { starterPlanSheet, confirmSheet, importFromApp } from '../sheets.jsx'
+import { starterPlanSheet, confirmSheet, importFromApp, bwSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Section, Row, SelectRow, Switch, Segmented, Button, TextField } from '../components/ui.jsx'
 
@@ -92,7 +92,7 @@ export default function Settings() {
       </> : user ? <>
         <Row icon="personCircle" iconTint="var(--grey)" title={user.name} subtitle={t('Signed in — data syncs to this profile.')} />
         {user.admin && <Row icon="wrench" iconTint="var(--indigo)" title={t('Admin dashboard')} accessory="chevron" onClick={() => nav('/admin')} />}
-        <Row icon="signOut" iconTint="var(--red)" title={t('Sign out')} danger onClick={() => confirmSheet({ title: t('Sign out?'), message: t('Your data is synced to your profile first, then cleared from this device.'), confirmText: t('Sign out'), danger: true, onConfirm: () => { signOut(); nav('/home') } })} />
+        <Row icon="signOut" iconTint="var(--red)" title={t('Sign out')} danger onClick={() => confirmSheet({ title: t('Sign out?'), message: t('Your gym data is synced and cleared from this device. A linked Bluetooth scale stays paired until you choose Forget scale.'), confirmText: t('Sign out'), danger: true, onConfirm: () => { signOut(); nav('/home') } })} />
         <Row icon="shield" iconTint="var(--red)" title={t('Sign out everywhere')} subtitle={t('Ends this profile’s sessions on all your devices.')} danger onClick={signOutEverywhere} />
       </> : passwordEnabled ? <>
         <Row icon="person" iconTint="var(--blue)" title={t('Sign in with username and password')} accessory="chevron"
@@ -183,6 +183,9 @@ export default function Settings() {
     {/* ---------- data: fill it, bring things over, back it up, wipe it ---------- */}
     <Section title={t('Data')}>
       <Row icon="sparkles" iconTint="var(--acc)" title={t('Choose a starter plan')} subtitle={t('Options for 2, 3 or 4 training days')} accessory="chevron" onClick={starterPlanSheet} />
+      {user && !MOBILE && <Row icon="scale" iconTint="var(--teal)" title={t('Connect Huawei scale')}
+        subtitle={t('AH100 / CH100 via Bluetooth on Android')}
+        accessory="chevron" onClick={() => bwSheet()} />}
       <Row icon="shuffle" iconTint="var(--teal)" title={t('Import from another app')}
         subtitle={t('FitNotes, Strong, Hevy — or body weight from Apple Health')}
         accessory="chevron" onClick={() => importRef.current.click()} />

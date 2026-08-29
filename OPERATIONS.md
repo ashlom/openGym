@@ -74,4 +74,14 @@ Los perfiles vacíos pueden elegir desde Inicio, Plan o Configuración entre:
 
 El plan elegido reemplaza las rutinas y la asignación semanal actuales; luego todos los ejercicios, series, repeticiones y días se pueden editar manualmente. El historial de entrenamientos completados se conserva.
 
+## Balanza Huawei AH100 / CH100
+
+La carga de peso admite conexión directa por Web Bluetooth desde **Chrome en Android**. Se accede desde `Configuración → Datos → Conectar balanza Huawei` o desde la ficha de registro de peso.
+
+En el primer uso se solicitan la dirección Bluetooth/MAC de la balanza, edad, altura y sexo. La MAC puede consultarse con una herramienta de escaneo BLE como nRF Connect. La clave local, la MAC y esos datos quedan separados por perfil exclusivamente en el almacenamiento local de ese navegador; no se sincronizan ni forman parte del backup del servidor. La opción `Configurar balanza → Olvidar balanza` los elimina del dispositivo.
+
+Si la balanza ya está vinculada con Huawei Health u otra aplicación, openGym pide confirmación explícita antes de reemplazar esa vinculación. Nunca ejecuta `BIND` automáticamente. Después de recibir una medición válida y verificar su checksum, completa el peso y, cuando están disponibles, conserva grasa corporal e impedancia. El usuario todavía debe pulsar `Guardar`, por lo que una emisión repetida o accidental no modifica el perfil por sí sola.
+
+Safari/Chrome en iPhone no incluyen Web Bluetooth; allí queda disponible la carga manual. La prueba final del enlace BLE necesita la balanza física cerca del teléfono.
+
 No cambiar `RP_ID` después de registrar passkeys: WebAuthn las vincula al hostname exacto.
