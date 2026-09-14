@@ -10,6 +10,7 @@ import {
 } from '@simplewebauthn/server';
 import webpush from 'web-push';
 import { createAttemptLimiter, isPasswordHashValid, parsePasswordUsers, verifyPassword } from './password-auth.js';
+import { acceptedState, incomingStateIsStale } from './state-sync.js';
 
 const PORT = +(process.env.PORT || 3000);
 const DATA = process.env.DATA_DIR || '/data';
@@ -458,9 +459,12 @@ const routes = {
     if (!user) return json(res, 401, { error: 'not signed in' });
     const body = await readBody(req);
     if (!body.state || typeof body.state !== 'object') return json(res, 400, { error: 'state required' });
-    delete body.state.active;              // in-progress workouts stay device-local
-    atomicWrite(stateFile(user.id), JSON.stringify(body.state));
-    json(res, 200, { ok: true, ts: body.state._ts || null });
+    const current = readState(user.id);
+    if (incomingStateIsStale(current, body.state)) return json(res, 409, { error: 'newer state exists' });
+    const state = acceptedState(current, body.state);
+    delete state.active;                   // in-progress workouts stay device-local
+    atomicWrite(stateFile(user.id), JSON.stringify(state));
+    json(res, 200, { ok: true, ts: state._ts, rev: state._rev });
   },
 
   'GET /api/push/public-key': async (req, res) => json(res, 200, { key: vapid.publicKey }),

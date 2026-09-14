@@ -5,6 +5,7 @@ import { registerCustom } from '../lib/exercises.js'
 import { DEMO, DEMO_SEEDED } from '../lib/demo.js'
 import { MOBILE, nativeLoad, nativeSave, syncReminder } from '../lib/mobile.js'
 import { shouldClearExpiredProfile, shouldResetOwnedState } from '../lib/state-owner.js'
+import { shouldAcceptRemoteState } from '../lib/state-sync.js'
 
 const KEY = 'gym_state_v1'
 const OWNER_KEY = 'gym_state_owner_v1'
@@ -34,6 +35,9 @@ const hasData = st => !!((st.workouts || []).length || (st.routines || []).lengt
 export const useStore = create((set, get) => {
   let pushTm = null
   let saveTm = null
+  let pushInFlight = null
+  let pushQueued = false
+  let mutationGeneration = 0
 
   // Mobile build: mirror the state into a file in the app's data directory (survives WebView
   // storage eviction) and keep the native reminder schedule in step with the weekly plan.
@@ -42,13 +46,15 @@ export const useStore = create((set, get) => {
     saveTm = setTimeout(() => { saveTm = null; nativeSave(get().S); syncReminder(get().S) }, 800)
   }
 
-  const persist = (S, push = true) => {
-    S._ts = Date.now()
+  const persist = (S, push = true, touch = true) => {
+    if (touch) S._ts = Date.now()
     registerCustom(S.customEx)
     localStorage.setItem(KEY, JSON.stringify(S))
     set({ S })
     if (MOBILE) nativePersist()
     if (push && get().user) {
+      mutationGeneration++
+      localStorage.setItem('gym_dirty', '1')
       clearTimeout(pushTm)
       pushTm = setTimeout(() => get().pushState(), 1500)
     }
@@ -94,7 +100,13 @@ export const useStore = create((set, get) => {
       mut(S)
       persist(S, push)
     },
-    replaceState(S, push = false) { persist(clone(S), push) },
+    replaceState(S, push = false) {
+      const next = clone(S)
+      const currentRev = get().S?._rev
+      if (Number.isSafeInteger(currentRev)) next._rev = currentRev
+      else delete next._rev
+      persist(next, push)
+    },
 
     isGuest: () => localStorage.getItem('gym_guest') === '1',
     setGuest(v) { if (v) localStorage.setItem('gym_guest', '1'); else localStorage.removeItem('gym_guest'); set({}) },
@@ -124,23 +136,54 @@ export const useStore = create((set, get) => {
     async pushState() {
       const user = get().user
       if (!user || localStorage.getItem(OWNER_KEY) !== user.id) return
-      clearTimeout(pushTm)
-      try { await api('/api/data', { method: 'PUT', body: JSON.stringify({ state: get().S }) }); localStorage.removeItem('gym_dirty') }
-      catch (e) { localStorage.setItem('gym_dirty', '1') }
+      clearTimeout(pushTm); pushTm = null
+      if (pushInFlight) { pushQueued = true; return pushInFlight }
+      const run = async () => {
+        const sent = clone(get().S)
+        const sentGeneration = mutationGeneration
+        try {
+          const result = await api('/api/data', { method: 'PUT', body: JSON.stringify({ state: sent }) })
+          if (get().user?.id !== user.id || localStorage.getItem(OWNER_KEY) !== user.id) return
+          const current = clone(get().S)
+          if (Number.isSafeInteger(result.rev)) current._rev = result.rev
+          if (mutationGeneration === sentGeneration && Number.isFinite(result.ts)) current._ts = result.ts
+          persist(current, false, false)
+          if (mutationGeneration === sentGeneration) localStorage.removeItem('gym_dirty')
+          else pushQueued = true
+        } catch (e) {
+          if (get().user?.id !== user.id || localStorage.getItem(OWNER_KEY) !== user.id) return
+          localStorage.setItem('gym_dirty', '1')
+          if (e.status === 409) await get().pullState(true)
+        }
+      }
+      pushInFlight = run()
+      try { await pushInFlight }
+      finally {
+        pushInFlight = null
+        const retry = pushQueued && localStorage.getItem('gym_dirty') === '1'
+        pushQueued = false
+        if (retry) queueMicrotask(() => get().pushState())
+      }
     },
-    async pullState() {
+    async pullState(forceRemote = false) {
       const user = get().user
       if (!user || localStorage.getItem(OWNER_KEY) !== user.id) return
       try {
         const { state } = await api('/api/data')
+        if (get().user?.id !== user.id || localStorage.getItem(OWNER_KEY) !== user.id) return
         const S = get().S
         const dirty = localStorage.getItem('gym_dirty') === '1'
-        if (state && (!hasData(S) || ((state._ts || 0) >= (S._ts || 0) && !dirty))) {
+        if (state && (forceRemote || shouldAcceptRemoteState(S, state, dirty))) {
+          if (forceRemote) {
+            try { localStorage.setItem('gym_sync_conflict_backup_v1', JSON.stringify({ savedAt: Date.now(), userId: user.id, state: S })) } catch { /* storage full */ }
+          }
+          clearTimeout(pushTm); pushTm = null
           const active = S.active
           const next = Object.assign(clone(DEF), state)
           if (active) next.active = active
-          persist(next, false)
-        } else if (hasData(S)) { await get().pushState() }
+          localStorage.removeItem('gym_dirty')
+          persist(next, false, false)
+        } else if (!forceRemote && (dirty || hasData(S))) { await get().pushState() }
       } catch (e) { /* offline — keep local */ }
     },
 
