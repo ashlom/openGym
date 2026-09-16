@@ -1,0 +1,45 @@
+services:
+  api:
+    build:
+      context: ./api
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      RP_ID: ${RP_ID}
+      ORIGIN: ${ORIGIN}
+      RP_NAME: ${RP_NAME}
+      INVITE_ONLY: ${INVITE_ONLY}
+      ADMIN_UIDS: ${ADMIN_UIDS}
+      SESSION_DAYS: ${SESSION_DAYS}
+      VAPID_SUBJECT: ${VAPID_SUBJECT}
+      PASSWORD_USERS_FILE: ${PASSWORD_USERS_FILE}
+    volumes:
+      - /home/rafa/openGym/data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    expose:
+      - "80"
+    volumes:
+      - /home/rafa/openGym/media/img:/usr/share/nginx/html/img:ro
+      - /home/rafa/openGym/media/gif:/usr/share/nginx/html/gif:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
