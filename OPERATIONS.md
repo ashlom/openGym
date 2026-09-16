@@ -3,10 +3,11 @@
 ## Servicio
 
 - URL pública: `https://gym.rjagrimensura.com`
-- Origen local: `http://127.0.0.1:8787`
-- Proyecto: `/home/rafa/openGym`
+- Despliegue: Coolify, recurso `openGym` (`amxpz7snv8q0btz2n883sbtw`), desde `ashlom/openGym:main`
+- Compose de producción: `docker-compose.coolify.yml`
+- Proyecto local de mantenimiento: `/home/rafa/openGym`
 - Persistencia: `/home/rafa/openGym/data`
-- Publicación: Cloudflare Tunnel `6058c359-8365-4914-aa59-f0d2856e7433`
+- Publicación: Coolify Proxy en `443`, detrás del Cloudflare Tunnel `6058c359-8365-4914-aa59-f0d2856e7433`
 - Acceso habitual: usuario y contraseña; perfiles separados para `Rafa`, `Fer`, `Nico` y `Rodri`
 - Administración: sólo el perfil `Rafa` tiene permisos de administrador
 - Passkeys: conservadas sólo como compatibilidad interna; no aparecen en la pantalla de acceso
@@ -14,30 +15,30 @@
 
 ## Estado y logs
 
-```bash
-cd /home/rafa/openGym
-docker compose ps -a
-docker compose logs --tail=100 api web
-curl -fsS http://127.0.0.1:8787/api/health
-```
-
-El contenedor `media` termina con código 0 por diseño: sólo comprueba o descarga los recursos una vez.
-
-## Arranque, parada y actualización
+La fuente operativa es Coolify. El stack Compose local anterior debe permanecer detenido.
 
 ```bash
-cd /home/rafa/openGym
-docker compose up -d
-docker compose down
+curl -fsS https://gym.rjagrimensura.com/api/health
+
+docker ps --filter label=coolify.applicationId=amxpz7snv8q0btz2n883sbtw \
+  --format '{{.Names}}  {{.Status}}'
 ```
 
-Las imágenes públicas originales no están disponibles en GHCR, por lo que las actualizaciones deben compilarse localmente:
+Los logs, reinicios y despliegues se consultan desde el recurso `openGym` en Coolify.
+
+## Actualización y despliegue automático
+
+Cada `push` a `main` en `ashlom/openGym` activa el webhook de GitHub y Coolify recompila y reemplaza el stack automáticamente. Coolify usa `docker-compose.coolify.yml`; no ejecutar el `docker-compose.yml` local para producción.
+
+Despliegue manual excepcional mediante la API local de Coolify:
 
 ```bash
-cd /home/rafa/openGym
-git pull --rebase
-docker compose up -d --build
+curl -fsS -X POST \
+  -H "Authorization: Bearer $(<"$HOME/.config/coolify/api-token")" \
+  'http://127.0.0.1:8000/api/v1/deploy?uuid=amxpz7snv8q0btz2n883sbtw'
 ```
+
+Después de cualquier despliegue, comprobar el estado del recurso y `https://gym.rjagrimensura.com/api/health`.
 
 ## Copia de seguridad
 
@@ -53,7 +54,7 @@ La clave privada de cada passkey permanece en el dispositivo del usuario y no se
 
 ## DNS y publicación
 
-El CNAME proxied `gym.rjagrimensura.com` apunta al túnel Cloudflare `6058c359-8365-4914-aa59-f0d2856e7433`, cuya ruta termina en `http://localhost:8787`.
+El CNAME proxied `gym.rjagrimensura.com` apunta al túnel Cloudflare `6058c359-8365-4914-aa59-f0d2856e7433`. La ruta del túnel usa `https://localhost:443` con verificación TLS de origen desactivada y Coolify Proxy dirige el hostname al servicio `web` de openGym.
 
 ## Acceso y administración
 
