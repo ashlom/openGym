@@ -144,9 +144,22 @@ export function lastEntryFor(S, exId) {
     // `target` is what the session prescribed; finished workouts carry it so labels and the
     // progression engine can read a session back the way it was logged. Older workouts have
     // none — modeOf() falls back to the body part for them, which is what they were.
-    if (en && en.sets.some(s => s.done)) return { d: S.workouts[i].d, sets: en.sets.filter(s => s.done), target: en.target || null }
+    // `note` is what you wrote about the exercise that session — "seat on 4" is worth seeing
+    // the next time you walk up to the machine.
+    if (en && en.sets.some(s => s.done)) return { d: S.workouts[i].d, sets: en.sets.filter(s => s.done), target: en.target || null, note: en.note || null }
   }
   return null
+}
+// Every logged session of one exercise, newest first, for the per-exercise history list.
+export function entriesFor(S, exId, limit = 20) {
+  const out = []
+  for (let i = S.workouts.length - 1; i >= 0 && out.length < limit; i--) {
+    const w = S.workouts[i]
+    w.entries.forEach(en => {
+      if (en.id === exId && en.sets.some(s => s.done)) out.push({ d: w.d, wid: w.id, name: w.name, entry: en })
+    })
+  }
+  return out.slice(0, limit)
 }
 export function bestWeightFor(S, exId) {
   let best = 0

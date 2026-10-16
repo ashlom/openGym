@@ -6,10 +6,11 @@ import { uid } from '../lib/format.js'
 import { t } from '../lib/i18n.js'
 import { supersetUnits, cleanupSg, exLine } from '../lib/history.js'
 import { Thumb } from '../components/Media.jsx'
-import { glyphPicker, exercisePicker, exConfigSheet, confirmSheet } from '../sheets.jsx'
+import { glyphPicker, exercisePicker, exConfigSheet, confirmSheet, swapSheet } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { glyphOf } from '../lib/glyphs.js'
-import { Button, SelectRow } from '../components/ui.jsx'
+import { Button, SelectRow, TextArea } from '../components/ui.jsx'
+import { swapConfig } from '../lib/swaps.js'
 import { POLICIES_FOR, POLICY_NAME, POLICY_DESC } from '../lib/progression.js'
 import BodyMap from '../components/BodyMap.jsx'
 import { loadOfRoutine, rankOf, MUSCLE_NAME } from '../lib/muscles.js'
@@ -56,6 +57,14 @@ export default function RoutineEdit() {
       {t('Applies to every exercise in this routine that does not set its own rule.')}
     </div>
 
+    {/* Shown at the top of every session of this routine — rest times, tempo, the plan for
+        the block, whatever a coach would tell you before you start. */}
+    <h4 className="sec">{t('Routine notes')}</h4>
+    <TextArea rows={3} maxLength={2000} placeholder={t('Instructions shown when you start this routine — rest between sets, tempo, focus…')}
+      defaultValue={r.notes || ''}
+      onChange={ev => update(s => { const x = s.routines.find(y => y.id === id); const v = ev.target.value.trim(); if (v) x.notes = ev.target.value.slice(0, 2000); else delete x.notes })} />
+    <div style={{ height: 16 }} />
+
     {r.ex.length ? <div className="list">{r.ex.map((e, i) => {
       // An unresolvable id is shown rather than skipped — hiding it left an entry you
       // could neither see nor delete, but that still turned up in the workout.
@@ -64,7 +73,13 @@ export default function RoutineEdit() {
       return <div key={i}>
         {unitFirst.has(i) && <div className="ss-label"><Icon name="link" />{t('Superset')}</div>}
         <div className={'item' + (inSS.has(i) ? ' in-ss' : '')} onClick={() => {
-          exConfigSheet(ex, e, cfg => edit(x => { x[i] = { id: x[i].id, sg: x[i].sg, ...cfg } }), () => edit(x => { x.splice(i, 1); cleanupSg(x) }), r)
+          // Swapping here is the permanent kind: the routine itself is what is being edited.
+          const onSwap = () => swapSheet(ex, nx => edit(x => {
+            const old = x[i]
+            if (!old || old.id !== e.id) return
+            x[i] = { ...swapConfig(old, nx.id), id: nx.id, ...(old.sg ? { sg: old.sg } : {}) }
+          }), { exclude: r.ex.map(x => x.id), persist: { name: r.name, forced: true } })
+          exConfigSheet(ex, e, cfg => edit(x => { x[i] = { id: x[i].id, sg: x[i].sg, ...cfg } }), () => edit(x => { x.splice(i, 1); cleanupSg(x) }), r, onSwap)
         }}>
           <Thumb ex={ex} />
           <div className="grow"><div className="tt capitalize">{ex.n}</div><div className="ss">{exLine(e, S.unit)}</div></div>

@@ -3,7 +3,9 @@ import { useStore } from './store/useStore.js'
 import { useUI } from './store/useUI.js'
 import { EXDB, EXIDX, BODYPARTS, isCardio, isBodyweightEq, allExercises, equipmentOf } from './lib/exercises.js'
 import { fmtDate, fmtNum, fmtVol, fmtDur, durPart, todayISO, uid, exCount, DAYN, MONTHS_LONG, ACCENTS } from './lib/format.js'
-import { lastEntryFor, bestWeightFor, buildSets, effectiveRoutineId, workoutVolume, setsDone, setsDoneActive, lastBW, supersetUnits, unitOf, setLabel, defaultConfig, cleanupSg, modeOf, effortOf, isBw, isPerSide, sideReps } from './lib/history.js'
+import { lastEntryFor, bestWeightFor, buildSets, effectiveRoutineId, workoutVolume, setsDone, setsDoneActive, lastBW, supersetUnits, unitOf, setLabel, defaultConfig, cleanupSg, modeOf, effortOf, isBw, isPerSide, sideReps, entriesFor } from './lib/history.js'
+import { smartSwaps, skillOf, isCompound, swapConfig } from './lib/swaps.js'
+import { warmupSets, warmLabel, MAX_WARM } from './lib/warmup.js'
 import { beep, vibrate } from './lib/sound.js'
 import { t, instrFor, getLang, INSTR_LANGS } from './lib/i18n.js'
 import { nav } from './lib/nav.js'
@@ -11,7 +13,7 @@ import { STARTER_PLANS, installStarterPlan, starterPlan } from './lib/starter.js
 import Media, { Thumb } from './components/Media.jsx'
 import Stepper from './components/Stepper.jsx'
 import Icon from './components/Icon.jsx'
-import { Button, Slider, Switch, Segmented, SelectRow, Row, NumberField, TextField } from './components/ui.jsx'
+import { Button, Slider, Switch, Segmented, SelectRow, Row, NumberField, TextField, TextArea, Check } from './components/ui.jsx'
 import { glyphOf, GLYPH_GROUPS, DEFAULT_GLYPH } from './lib/glyphs.js'
 import BodyMap from './components/BodyMap.jsx'
 import { loadOfWorkouts } from './lib/muscles.js'
@@ -643,7 +645,7 @@ function usageMap(st) {
   st.workouts.forEach(w => w.entries.forEach(e => { u[e.id] = (u[e.id] || 0) + 1 }))
   return u
 }
-function ExercisePicker({ onPick, close }) {
+function ExercisePicker({ onPick, title }) {
   const st = useStore(s => s.S)
   const usage = usageMap(st)
   const [q, setQ] = useState('')
@@ -662,7 +664,7 @@ function ExercisePicker({ onPick, close }) {
   const f = eqOn ? base.filter(e => e.eq === eqOn) : base
   const chosenCount = Object.keys(usage).length
   return <>
-    <h3>{t('Add exercise')}</h3>
+    <h3>{title || t('Add exercise')}</h3>
     <div className="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></svg>
       <input className="input" placeholder={t('Search {0} exercises…', all.length)} value={q} onChange={e => { setQ(e.target.value); setShown(50) }} /></div>
     <div className="chips" style={{ margin: eqOpts.length > 1 ? '10px 0 6px' : '10px 0' }}>
@@ -688,7 +690,7 @@ function ExercisePicker({ onPick, close }) {
     {f.length > shown && <><div style={{ height: 8 }} /><Button onClick={() => setShown(s => s + 50)}>{t('Show more')}</Button></>}
   </>
 }
-export const exercisePicker = onPick => ui().openSheet(close => <ExercisePicker onPick={onPick} close={close} />)
+export const exercisePicker = (onPick, title) => ui().openSheet(() => <ExercisePicker onPick={onPick} title={title} />)
 
 /* ============================ exercise config ============================ */
 // Progression settings for one exercise (issue #17). Shown inside the config sheet because
@@ -717,7 +719,7 @@ function ProgressionFields({ ex, mode, c, setC, routine, unit }) {
   </>
 }
 
-function ExConfig({ ex, existing, onSave, onDelete, close, routine }) {
+function ExConfig({ ex, existing, onSave, onDelete, onSwap, close, routine }) {
   const st = useStore(s => s.S)
   const cardio = isCardio(ex.id)
   const [c, setC] = useState(existing || defaultConfig(ex.id))
@@ -744,9 +746,15 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine }) {
     // rather than carrying a flag nothing downstream can read.
     const flags = {}
     if (bw !== isBodyweightEq(ex.id)) flags.bodyweight = bw
-    if (cardio) onSave({ sets, min: Math.max(1, Math.round(c.min) || 20), speed: Math.max(0, c.speed || 8) })
+    // A note is kept only when there is something in it, so an untouched config is unchanged.
+    const note = String(c.note || '').trim().slice(0, 500)
+    if (note) flags.note = note
+    if (cardio) onSave({ sets, min: Math.max(1, Math.round(c.min) || 20), speed: Math.max(0, c.speed || 8), ...flags })
     else if (mode === 'time') onSave({ sets, mode: 'time', sec: Math.max(1, Math.round(c.sec) || 45), weight: Math.max(0, c.weight || 0), ...flags, ...prog })
     else {
+      // Warm-ups only ramp into rep work — a timed hold or a cardio block has no load to ramp to.
+      const warm = Math.max(0, Math.min(MAX_WARM, Math.round(c.warm) || 0))
+      if (warm) flags.warm = warm
       // A unilateral target is stored even: the split has to divide, and a typed 15 would
       // otherwise plan seven reps on one side and eight on the other, every session.
       const typed = Math.max(1, Math.round(c.reps) || 10)
@@ -825,13 +833,137 @@ function ExConfig({ ex, existing, onSave, onDelete, close, routine }) {
         ? t('Reps climb to {0}, then a set is added and the reps start over. At {1} sets it asks you to add weight instead.', c.repsMax, MAX_BW_SETS)
         : t('Reps climb by one whenever every set was clean. Set a ceiling to add sets instead of reps forever.')}
     </div>}
+    {mode === 'reps' && <>
+      <div className="row cfgrow" style={{ marginBottom: 8 }}>
+        <Stepper label={t('Warm-up sets')} value={c.warm || 0} step={1} decimal={false}
+          onChange={v => setC(x => ({ ...x, warm: Math.min(MAX_WARM, v) }))} />
+      </div>
+      <div className="small dim" style={{ marginBottom: 18 }}>
+        {c.warm > 0
+          ? t('Ramp-up sets (W1, W2…) before the working sets, built from your working weight. They never count toward progression, records or volume.')
+          : t('Add warm-up sets to ramp up before the working sets.')}
+      </div>
+    </>}
     <ProgressionFields ex={ex} mode={mode} c={c} setC={setC} routine={routine} unit={st.unit} />
+    <h4 className="sec">{t('Exercise note')}</h4>
+    <TextArea rows={2} maxLength={500} placeholder={t('Setup, cues… e.g. seat on 4, neutral grip')}
+      value={c.note || ''} onChange={e => setC(x => ({ ...x, note: e.target.value }))} />
+    <div className="small dim" style={{ margin: '6px 2px 18px' }}>{t('Shown every time you train this exercise in this routine.')}</div>
     <Button variant="primary" onClick={save}>{existing ? t('Save') : t('Add to routine')}</Button>
+    {onSwap && <><div style={{ height: 8 }} /><Button icon="swap" onClick={() => { close(); onSwap() }}>{t('Swap exercise')}</Button></>}
     {ex.custom && <><div style={{ height: 8 }} /><Button icon="pencil" onClick={() => { close(); customExSheet(ex) }}>{t('Edit or delete this exercise')}</Button></>}
     {onDelete && <><div style={{ height: 8 }} /><Button variant="danger" onClick={() => { close(); onDelete() }}>{t('Remove from routine')}</Button></>}
   </>
 }
-export const exConfigSheet = (ex, existing, onSave, onDelete, routine) => ui().openSheet(close => <ExConfig ex={ex} existing={existing} onSave={onSave} onDelete={onDelete} routine={routine} close={close} />)
+export const exConfigSheet = (ex, existing, onSave, onDelete, routine, onSwap) => ui().openSheet(close => <ExConfig ex={ex} existing={existing} onSave={onSave} onDelete={onDelete} onSwap={onSwap} routine={routine} close={close} />)
+
+/* ============================ smart swaps ============================ */
+const SKILL = { low: 'Low skill', medium: 'Medium skill', high: 'High skill' }
+const SKILL_BARS = { low: 1, medium: 2, high: 3 }
+function SkillBars({ level }) {
+  const n = SKILL_BARS[level] || 1
+  return <span className="skill" aria-hidden="true">{[0, 1, 2].map(i => <i key={i} className={i < n ? 'on' : ''} style={{ height: 5 + i * 3 }} />)}</span>
+}
+
+// Ranked stand-ins for one exercise (lib/swaps.js), plus the whole catalogue behind a
+// search for when none of the suggestions is what you want. `persist` describes the
+// routine the exercise came from: when there is one, a tick decides whether the swap is
+// just for today or replaces the exercise in the routine for good.
+function SwapSheet({ base, exclude, persist, onPick, close }) {
+  const st = useStore(s => s.S)
+  const usage = usageMap(st)
+  const [keep, setKeep] = useState(false)
+  const list = smartSwaps(base, allExercises(st), { exclude, usage, limit: 12 })
+  const pick = ex => { close(); onPick(ex, !!(persist && (persist.forced || keep))) }
+  return <>
+    <h3 className="capitalize">{t('Swap “{0}”', base.n)}</h3>
+    <div className="muted small" style={{ marginBottom: 12 }}>{t('Ranked by target muscle, movement pattern and equipment.')}</div>
+    {persist && !persist.forced && <div className="sect-b" style={{ marginBottom: 14 }}>
+      <Row icon="clipboard" iconTint="var(--acc)" title={t('Also change it in the routine')}
+        subtitle={keep ? t('From now on “{0}” uses the new exercise.', persist.name) : t('Only for today — the routine stays as it is.')}>
+        <Check checked={keep} onChange={setKeep} />
+      </Row>
+    </div>}
+    <h4 className="sec">{t('Smart swaps')}</h4>
+    {list.length ? <div className="list">{list.map(({ ex }, i) => <div key={ex.id} className="item swap-item" onClick={() => pick(ex)}>
+      <span className="swap-rank">#{i + 1}</span>
+      <Thumb ex={ex} />
+      <div className="grow">
+        <div className="tt capitalize">{ex.n}</div>
+        <div className="ss capitalize">{[ex.tg, ...(ex.sm || []).slice(0, 2)].filter(Boolean).map(m => t(m)).join(', ')}</div>
+        <div className="swap-meta">
+          <span className="capitalize">{t(ex.eq)}</span>
+          <span><SkillBars level={skillOf(ex)} />{t(SKILL[skillOf(ex)])}</span>
+          <span className={'tag' + (isCompound(ex) ? '' : ' acc')}>{isCompound(ex) ? t('Compound') : t('Isolation')}</span>
+          {usage[ex.id] && <span className="tag acc"><Icon name="starFill" /></span>}
+        </div>
+      </div>
+      <span className="swap-go"><Icon name="swap" /></span>
+    </div>)}</div> : <div className="empty">{t('No close matches — search the full library below.')}</div>}
+    <div style={{ height: 12 }} />
+    <Button icon="magnifier" onClick={() => {
+      const h = exercisePicker(ex => {
+        if (ex.id === base.id) { toast(t('That’s the exercise you already have')); return }
+        h.close(); pick(ex)
+      }, t('Swap exercise'))
+    }}>{t('Search all exercises')}</Button>
+  </>
+}
+/**
+ * opts.exclude — ids not to suggest; opts.persist — { name, forced } of the routine the
+ * exercise belongs to (forced = editing the routine itself, so the change is always kept);
+ * onPick(ex, persist) — persist is true when the routine should change too.
+ */
+export const swapSheet = (base, onPick, opts = {}) =>
+  ui().openSheet(close => <SwapSheet base={base} exclude={opts.exclude || []} persist={opts.persist || null} onPick={onPick} close={close} />)
+
+/* ============================ notes ============================ */
+function NoteEditor({ title, subtitle, value, placeholder, onSave, close }) {
+  const [v, setV] = useState(value || '')
+  const save = text => { close(); onSave(String(text).trim().slice(0, 500)) }
+  return <>
+    <h3>{title}</h3>
+    {subtitle && <div className="muted small capitalize" style={{ marginBottom: 10 }}>{subtitle}</div>}
+    <TextArea rows={4} maxLength={500} autoFocus placeholder={placeholder || t('Write a note…')} value={v} onChange={e => setV(e.target.value)} />
+    <div style={{ height: 12 }} />
+    <Button variant="primary" onClick={() => save(v)}>{t('Save note')}</Button>
+    {value && <><div style={{ height: 8 }} /><Button variant="ghost" className="dim" icon="trash" onClick={() => save('')}>{t('Delete note')}</Button></>}
+  </>
+}
+/** A small text editor in a sheet. onSave('') means the note was cleared. */
+export const noteSheet = opts => ui().openSheet(close => <NoteEditor {...opts} close={close} />)
+
+/* ============================ one exercise's history ============================ */
+function ExerciseHistory({ id, close }) {
+  const st = useStore(s => s.S)
+  const ex = EXIDX[id]
+  const rows = entriesFor(st, id, 20)
+  return <>
+    <h3 className="capitalize">{ex ? ex.n : id}</h3>
+    <div className="muted small" style={{ marginBottom: 12 }}>{rows.length > 1 ? t('Your last {0} sessions', rows.length) : rows.length ? t('Your last session') : t('No sessions logged yet.')}</div>
+    <div className="list" style={{ gap: 0 }}>{rows.map(r => {
+      const notes = r.entry.sets.map((s, i) => s.done && s.note ? t('Set {0}: {1}', i + 1, s.note) : null).filter(Boolean)
+      return <div key={r.wid + r.d} className="hist-row">
+        <div className="row between"><b>{fmtDate(r.d, true)}</b><span className="small dim">{r.name}</span></div>
+        {r.entry.warm && r.entry.warm.length > 0 && <div className="small dim">{t('Warm-up')}: {r.entry.warm.map(s => setLabel(id, s, r.entry.target)).join(', ')}</div>}
+        <div className="small">{r.entry.sets.filter(s => s.done).map(s => setLabel(id, s, r.entry.target)).join('  ·  ')}</div>
+        {r.entry.note && <div className="small note-line"><Icon name="note" />{r.entry.note}</div>}
+        {notes.map((n, i) => <div key={i} className="small note-line"><Icon name="note" />{n}</div>)}
+      </div>
+    })}</div>
+    <div style={{ height: 12 }} />
+    {ex && <Button icon="info" onClick={() => { close(); exerciseDetailSheet(ex) }}>{t('Exercise details & 1RM')}</Button>}
+  </>
+}
+export const exerciseHistorySheet = id => ui().openSheet(close => <ExerciseHistory id={id} close={close} />)
+
+// The warm-up list a session starts with for one routine entry: the planned count, ramped
+// to the first working set's weight (after progression has set it).
+export function initialWarmups(cfg, sets, unit) {
+  if (!(cfg && cfg.warm > 0) || modeOf(cfg) !== 'reps') return undefined
+  return warmupSets((sets[0] && sets[0].w) || 0, cfg.warm, unit)
+}
+export { warmLabel }
 
 /* ============================ glyph picker ============================ */
 // Grouped by what the glyph means for a training day, so picking one is a scan
@@ -991,7 +1123,10 @@ function WorkoutDetail({ w, close }) {
       return <div key={i} className="row" style={{ marginBottom: 12, alignItems: 'flex-start' }}>
         {ex && <Thumb ex={ex} />}
         <div className="grow"><div className="tt capitalize" style={{ fontWeight: 600 }}>{ex ? ex.n : (e.n || e.id)} {w.prs && w.prs.includes(e.id) && <span className="pr"><Icon name="trophy" />PR</span>}</div>
-          <div className="ss">{e.sets.filter(s => s.done).map(s => setLabel(e.id, s, e.target)).join('  ·  ') || t('no sets')}</div></div>
+          {e.warm && e.warm.length > 0 && <div className="ss dim">{t('Warm-up')}: {e.warm.map(s => setLabel(e.id, s, e.target)).join(', ')}</div>}
+          <div className="ss">{e.sets.filter(s => s.done).map(s => setLabel(e.id, s, e.target)).join('  ·  ') || t('no sets')}</div>
+          {e.note && <div className="small note-line"><Icon name="note" />{e.note}</div>}
+          {e.sets.map((s, k) => s.done && s.note ? <div key={k} className="small note-line"><Icon name="note" />{t('Set {0}: {1}', k + 1, s.note)}</div> : null)}</div>
       </div>
     })}
     <Button variant="danger" onClick={() => confirmSheet({ title: t('Delete workout?'), message: t('This removes it from your history for good.'), confirmText: t('Delete'), danger: true, onConfirm: () => { update(s => { s.workouts = s.workouts.filter(x => x.id !== w.id) }); close(); toast(t('Workout deleted')) } })}>{t('Delete workout')}</Button>
@@ -1066,7 +1201,9 @@ export function beginWorkout(routineId, bw) {
   // kept on the entry purely so the workout can explain the number it chose.
   const entries = (r ? r.ex : []).map(cfg => {
     const plan = nextPrescription(st, cfg, r)
-    return { id: cfg.id, sg: cfg.sg, target: { ...cfg }, plan, sets: applyPrescription(buildSets(st, cfg), plan) }
+    const sets = applyPrescription(buildSets(st, cfg), plan)
+    const warm = initialWarmups(cfg, sets, st.unit)
+    return { id: cfg.id, sg: cfg.sg, target: { ...cfg }, plan, sets, ...(warm ? { warm } : {}) }
   })
   update(s => {
     s.active = { id: uid(), d: todayISO(), start: Date.now(), routineId, name: r ? r.name : t('Freestyle'), bw: bw || null, cur: 0, entries }
@@ -1186,7 +1323,14 @@ function doFinishWorkout() {
     // `target` (what the session prescribed) is kept alongside the sets: without it a
     // finished workout cannot say whether it hit its reps, and a timed session reads back
     // as "0 reps". It is what the progression engine works from.
-    entries: A.entries.map(e => ({ id: e.id, sets: e.sets, topW: e.topW || null, target: e.target || null })).filter(e => e.sets.some(s => s.done)),
+    // Warm-ups and notes ride along only when there is something to keep. Warm-ups stay out
+    // of `sets`, so nothing that reads a session's work (volume, PRs, 1RM, progression)
+    // ever counts them.
+    entries: A.entries.map(e => {
+      const warm = (e.warm || []).filter(s => s.done)
+      return { id: e.id, sets: e.sets, topW: e.topW || null, target: e.target || null,
+        ...(warm.length ? { warm } : {}), ...(e.note ? { note: e.note } : {}) }
+    }).filter(e => e.sets.some(s => s.done)),
     prs
   }
   w.vol = workoutVolume(w)

@@ -556,9 +556,50 @@ h4.sec{
 .sethead .eff-sp{text-align:center}
 .sethead .ck-sp{width:30px;flex:none}
 .setrow{display:flex;align-items:center;gap:8px;padding:7px 0;position:relative}
-.setrow+.setrow::before{
+/* each row sits in a .setgrp with its note (if any) underneath, so the hairline goes between groups */
+.setgrp+.setgrp>.setrow::before{
   content:'';position:absolute;left:32px;right:0;top:0;height:var(--hair);background:var(--sep);
 }
+/* the set number is a button: it opens that set's note and removal */
+.setrow button.n{padding:0;position:relative}
+.setrow button.n.noted::after{
+  content:'';position:absolute;top:-1px;right:-1px;width:7px;height:7px;border-radius:50%;
+  background:var(--yellow);box-shadow:0 0 0 1.5px var(--bg, #000);
+}
+/* warm-ups (W1, W2…): same row, set apart by an orange tag instead of a numbered disc */
+.setrow.warm .n{background:color-mix(in srgb,var(--orange) 18%,transparent);color:var(--orange);font-size:11px;font-weight:600}
+.setrow.warm.done .n{background:var(--orange);color:#000}
+.setrow .stp.spacer{visibility:hidden}
+.set-note{font-size:12.5px;color:var(--label-2);margin:-3px 0 6px 32px;line-height:1.35;white-space:pre-wrap}
+/* notes: the routine's standing note, today's note and last time's, one line each */
+.note-line{
+  display:flex;align-items:flex-start;gap:6px;font-size:13px;line-height:1.38;
+  color:var(--label-2);margin:4px 0;text-align:left;white-space:pre-wrap;
+}
+.note-line svg{flex:none;margin-top:2px;font-size:13px}
+.note-line.plan{color:var(--label)}
+.note-line.plan svg{color:var(--acc)}
+.note-line.mine svg{color:var(--yellow)}
+.rnotes{margin-bottom:12px}
+.rnotes-b{white-space:pre-wrap;line-height:1.45;font-size:14.5px;color:var(--label-2)}
+.rnotes-b.folded{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+/* smart swaps */
+.swap-item{position:relative;align-items:flex-start}
+.swap-rank{
+  position:absolute;top:0;left:0;background:var(--acc);color:var(--on-acc);
+  font-size:11px;font-weight:700;padding:2px 6px;border-radius:var(--r-card) 0 8px 0;z-index:1;
+}
+.swap-meta{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-top:6px;font-size:12px;color:var(--label-2)}
+.swap-meta>span{display:inline-flex;align-items:center;gap:4px}
+.swap-go{
+  flex:none;align-self:center;width:38px;height:38px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;background:var(--acc);color:var(--on-acc);font-size:18px;
+}
+.skill{display:inline-flex;align-items:flex-end;gap:2px;height:11px}
+.skill i{width:3px;border-radius:1px;background:var(--label-3)}
+.skill i.on{background:var(--acc)}
+/* one exercise's past sessions */
+.hist-row{padding:10px 2px;border-bottom:1px solid var(--sep);display:flex;flex-direction:column;gap:3px}
 .setrow .n{
   width:24px;height:24px;border-radius:50%;background:var(--surface-2);color:var(--label-2);
   display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500;flex:none;
