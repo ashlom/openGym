@@ -45,6 +45,14 @@ function Sheet({ sheet }) {
   }, [])
 
   const close = () => closeSheet(sheet.id)
+  if (sheet.kind === 'drawer') {
+    return (
+      <div>
+        <div className="mback" onClick={close} />
+        <Drawer close={close}>{sheet.render(close)}</Drawer>
+      </div>
+    )
+  }
   if (sheet.kind === 'center') {
     return (
       <div>
@@ -62,6 +70,32 @@ function Sheet({ sheet }) {
       </div>
     </div>
   )
+}
+
+// A panel that slides in from the left edge; swiping it back left dismisses it.
+function Drawer({ close, children }) {
+  const ref = useRef(null)
+  const drag = useRef({ x: null, y: null, dx: 0 })
+  const onTouchStart = e => { drag.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, dx: 0 } }
+  const onTouchMove = e => {
+    const d = drag.current, el = ref.current
+    if (d.x === null) return
+    const dx = e.touches[0].clientX - d.x, dy = e.touches[0].clientY - d.y
+    // a mostly vertical gesture is the list scrolling, not a dismiss
+    if (!d.dx && Math.abs(dy) > Math.abs(dx)) { d.x = null; return }
+    d.dx = Math.min(0, dx)
+    el.style.transition = 'none'
+    el.style.transform = `translateX(${d.dx}px)`
+  }
+  const onTouchEnd = () => {
+    const d = drag.current, el = ref.current
+    if (d.x === null) return
+    el.style.transition = 'transform .2s'
+    if (d.dx < -70) { el.style.transform = 'translateX(-110%)'; setTimeout(close, 180) }
+    else el.style.transform = ''
+    d.x = null
+  }
+  return <div className="drawer" ref={ref} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>{children}</div>
 }
 
 export default function Modals() {

@@ -8,7 +8,7 @@ import { fmtNum, fmtDate, todayISO, exCount, DAYN } from '../lib/format.js'
 import { beep, vibrate } from '../lib/sound.js'
 import { t } from '../lib/i18n.js'
 import { api } from '../lib/api.js'
-import Media from '../components/Media.jsx'
+import Media, { Thumb } from '../components/Media.jsx'
 import { startFlow, exercisePicker, exConfigSheet, exerciseDetailSheet, topWeightSheet, finishWorkout, workoutCompleteSheet, confirmSheet, swapSheet, noteSheet, exerciseHistorySheet, initialWarmups, warmLabel } from '../sheets.jsx'
 import Icon from '../components/Icon.jsx'
 import { Button, Check, NumberField, Row } from '../components/ui.jsx'
@@ -57,7 +57,7 @@ function Elapsed({ start }) {
 }
 
 /* ---------- one exercise block (reps: weight×reps · time: a held duration · cardio: duration+speed) ---------- */
-function ExerciseBlock({ entryIdx, compact, onToggle, onField, onAddSet, onRemoveSet, onStartTimed, onWarmToggle, onWarmField, onSetTap, onMenu, onNote }) {
+function ExerciseBlock({ entryIdx, compact, onToggle, onField, onAddSet, onRemoveSet, onStartTimed, onWarmToggle, onWarmField, onSetTap, onMenu, onNote, onAddWarm }) {
   const S = useStore(s => s.S)
   const working = useUI(s => s.work)
   const entry = S.active.entries[entryIdx]
@@ -147,6 +147,8 @@ function ExerciseBlock({ entryIdx, compact, onToggle, onField, onAddSet, onRemov
       <div className={'sethead' + (col3 ? ' eff3' : '')}><span className="n-sp" /><span className="w-sp">{col1.hd}</span>{col2 && <span className="r-sp">{col2.hd}</span>}{col3 && <span className="eff-sp">{col3.hd}</span>}{timed && <span className="ck-sp" />}<span className="ck-sp" /></div>
       {/* Warm-ups sit above the work, labelled W1, W2… — same steppers, no effort rating,
           and kept in their own list so nothing that measures the session counts them. */}
+      {/* where W1 would go: one tap to ramp up, offered until the exercise is under way */}
+      {mode === 'reps' && !warm.length && !entry.sets.some(s => s.done) && <button className="warm-add" onClick={onAddWarm}><Icon name="flame" />{t('Add warm-up set')}</button>}
       {warm.map((s, i) => <div key={'w' + i} className="setgrp">
         <div className={'setrow warm' + (s.done ? ' done' : '') + (col3 ? ' eff3' : '')}>
           <button className={'n' + (s.note ? ' noted' : '')} aria-label={t('Warm-up set options')} onClick={() => onSetTap('warm', i)}>{warmLabel(i)}</button>
@@ -191,6 +193,32 @@ function RoutineNotes({ text }) {
     <div className="row" style={{ gap: 8, marginBottom: 6 }}><Icon name="clipboard" className="accent" /><b>{t('Routine notes')}</b></div>
     <div className={'rnotes-b' + (open || !long ? '' : ' folded')}>{body}</div>
     {long && <button className="accent small" style={{ marginTop: 6, fontWeight: 600 }} onClick={() => setOpen(o => !o)}>{open ? t('Show less') : t('Show more')}</button>}
+  </div>
+}
+
+/* ---------- every exercise of the session at a glance, to jump straight to one ---------- */
+function ExerciseNav({ onPick }) {
+  const A = useStore(s => s.S.active)
+  if (!A) return null
+  const units = supersetUnits(A.entries)
+  const cur = Math.min(A.cur, Math.max(0, A.entries.length - 1))
+  return <div className="exnav">
+    {units.map((u, k) => <button key={u[0]} className={'exnav-u' + (u.includes(cur) ? ' on' : '') + (u.length > 1 ? ' ss' : '')} onClick={() => onPick(u[0])}>
+      <span className="exnav-k">{k + 1}</span>
+      <span className="exnav-l">{u.map(idx => {
+        const e = A.entries[idx]
+        const ex = exOr(e.id)
+        const n = e.sets.filter(s => s.done).length
+        const all = e.sets.length > 0 && n === e.sets.length
+        return <span key={idx} className="exnav-e">
+          <Thumb ex={ex} />
+          <span className="grow">
+            <span className="tt capitalize">{ex.n}</span>
+            <span className={'ss' + (all ? ' ok' : '')}>{all ? <><Icon name="check" />{t('Done')}</> : t('{0} sets', n + '/' + e.sets.length)}</span>
+          </span>
+        </span>
+      })}</span>
+    </button>)}
   </div>
 }
 
@@ -387,10 +415,21 @@ function ActiveWorkout() {
       <div style={{ height: 8 }} />
     </>)
   }
+  // Jumping goes to the first exercise of a superset, like Prev/Next, and back to the top of
+  // the page so the new exercise opens on its name rather than wherever the old one was scrolled.
+  const goTo = idx => {
+    update(s => { s.active.cur = idx })
+    setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 60)
+  }
+  const openNav = () => useUI.getState().openSheet(close => <>
+    <h3>{t('Exercises')}</h3>
+    <ExerciseNav onPick={idx => { close(); goTo(idx) }} />
+  </>, { kind: 'drawer' })
+
   // Everything an ExerciseBlock needs beyond the sets themselves, bound to one entry.
   const extra = idx => ({
     onWarmToggle: i => warmToggle(idx, i), onWarmField: (i, f, v) => warmField(idx, i, f, v),
-    onSetTap: (kind, i) => setTap(idx, kind, i), onMenu: () => entryMenu(idx), onNote: () => editEntryNote(idx)
+    onSetTap: (kind, i) => setTap(idx, kind, i), onMenu: () => entryMenu(idx), onNote: () => editEntryNote(idx), onAddWarm: () => addWarm(idx)
   })
 
   // Live-presence heartbeat so the admin dashboard can show who's training now. Signed-in only —
@@ -428,9 +467,12 @@ function ActiveWorkout() {
     </div>
     <div className="wprog"><i style={{ width: (total ? done / total * 100 : 0) + '%' }} /></div>
     <RoutineNotes text={(S.routines.find(r => r.id === A.routineId) || {}).notes} />
+    {/* on a wide screen the list just stays open beside the session */}
+    {A.entries.length > 1 && <aside className="wk-side"><div className="wk-side-h">{t('Exercises')}</div><ExerciseNav onPick={goTo} /></aside>}
 
     {A.entries.length ? <>
-      <div className="muted small" style={{ marginBottom: 6 }}>{isSuperset ? t('Superset {0} / {1}', unitIdx + 1, units.length) : t('Exercise {0} / {1}', unitIdx + 1, units.length)}</div>
+      {/* the counter opens the list of every exercise, so the 4th → 1st is one tap, not three */}
+      <button className="exnav-btn" onClick={openNav}><Icon name="list" />{isSuperset ? t('Superset {0} / {1}', unitIdx + 1, units.length) : t('Exercise {0} / {1}', unitIdx + 1, units.length)}<Icon name="chevronDown" /></button>
       {isSuperset ? (
         <div className="ss-card">
           <div className="ss-hd"><Icon name="link" />{t('Superset · do these back-to-back, rest after both')}</div>
